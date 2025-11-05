@@ -1,0 +1,236 @@
+<!-- client/index.html -->
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Banking Demo - JWT Auth</title>
+  <style>
+    /* Simple CSS */
+    body {
+      font-family: system-ui, Arial;
+      background: linear-gradient(180deg, #f7fafc, #eef2ff);
+      display: flex;
+      min-height: 100vh;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
+    }
+    .card {
+      background: white;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 6px 30px rgba(30, 41, 59, 0.08);
+      width: 420px;
+    }
+    h2 { margin-top: 0; }
+    label { display:block; margin-top:10px; font-size:14px; }
+    input[type="text"], input[type="password"], input[type="number"] {
+      width: 100%;
+      padding: 8px 10px;
+      margin-top:6px;
+      border-radius: 8px;
+      border: 1px solid #e6e9ef;
+    }
+    button {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: none;
+      background: #4f46e5;
+      color: white;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .muted { color: #6b7280; font-size: 13px; margin-top: 8px;}
+    .row { display:flex; gap:10px; align-items:center; }
+    .balance { font-weight:700; font-size:20px; margin-top: 12px; }
+    .error { color: #b91c1c; margin-top:8px; }
+    .success { color: #166534; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div id="login-section">
+      <h2>Banking Demo — Login</h2>
+      <label>Username
+        <input id="username" type="text" value="alice" />
+      </label>
+      <label>Password
+        <input id="password" type="password" value="password123" />
+      </label>
+      <button id="btnLogin">Login</button>
+      <div class="muted">Try <b>alice/password123</b> or <b>bob/hunter2</b></div>
+      <div id="login-msg" class="error"></div>
+    </div>
+
+    <div id="dashboard" style="display:none;">
+      <h2>Dashboard</h2>
+      <div>Welcome, <span id="who"></span></div>
+      <div class="balance">Balance: ₹<span id="balance">0.00</span></div>
+
+      <h3 style="margin-top:14px;">Transfer</h3>
+      <label>To (username)
+        <input id="toUsername" type="text" placeholder="bob" />
+      </label>
+      <label>Amount
+        <input id="amount" type="number" step="0.01" />
+      </label>
+      <button id="btnTransfer">Send</button>
+
+      <div id="transfer-msg"></div>
+
+      <div style="display:flex; gap:8px; margin-top:12px;">
+        <button id="btnRefresh">Refresh Token (manual)</button>
+        <button id="btnLogout" style="background:#ef4444">Logout</button>
+      </div>
+      <div id="dashboard-msg" class="error"></div>
+    </div>
+  </div>
+
+  <script>
+    // Client JS: stores access token in-memory
+    const API = 'http://localhost:4000';
+    let accessToken = null;
+    let username = null;
+
+    const el = id => document.getElementById(id);
+
+    async function callApi(path, opts = {}) {
+      const headers = opts.headers || {};
+      if (accessToken) headers['Authorization'] = 'Bearer ' + accessToken;
+      headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+      const res = await fetch(API + path, {
+        ...opts,
+        headers,
+        credentials: 'include' // needed for refreshToken cookie
+      });
+
+      // If access token expired, try refreshing once automatically
+      if (res.status === 401) {
+        const refreshed = await tryRefresh();
+        if (refreshed) {
+          headers['Authorization'] = 'Bearer ' + accessToken;
+          return fetch(API + path, { ...opts, headers, credentials: 'include' });
+        }
+      }
+      return res;
+    }
+
+    async function tryRefresh() {
+      // Call /token endpoint to swap refresh cookie for a new access token
+      try {
+        const r = await fetch(API + '/token', {
+          method: 'POST',
+          credentials: 'include'
+        });
+        if (!r.ok) {
+          // refresh failed
+          return false;
+        }
+        const data = await r.json();
+        accessToken = data.accessToken;
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    async function login() {
+      el('login-msg').textContent = '';
+      const u = el('username').value.trim();
+      const p = el('password').value;
+      if (!u || !p) { el('login-msg').textContent = 'Enter credentials'; return; }
+
+      try {
+        const res = await fetch(API + '/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ username: u, password: p })
+        });
+
+        if (!res.ok) {
+          const body = await res.json().catch(()=>({message:'Login failed'}));
+          el('login-msg').textContent = body.message || 'Login failed';
+          return;
+        }
+        const data = await res.json();
+        accessToken = data.accessToken;
+        username = u;
+        showDashboard();
+        await loadBalance();
+      } catch (err) {
+        el('login-msg').textContent = 'Network error';
+      }
+    }
+
+    async function loadBalance() {
+      el('dashboard-msg').textContent = '';
+      const r = await callApi('/balance', { method: 'GET' });
+      if (!r.ok) {
+        const b = await r.json().catch(()=>({message:'error'}));
+        el('dashboard-msg').textContent = b.message || 'Failed to load balance';
+        // if unauthorized, hide dashboard
+        if (r.status === 401 || r.status === 403) logoutClient();
+        return;
+      }
+      const body = await r.json();
+      el('who').textContent = body.username;
+      el('balance').textContent = body.balance.toFixed(2);
+    }
+
+    async function transfer() {
+      el('transfer-msg').textContent = '';
+      const toUsername = el('toUsername').value.trim();
+      const amount = el('amount').value;
+      if (!toUsername || !amount) { el('transfer-msg').textContent = 'Enter recipient and amount'; return; }
+
+      const res = await callApi('/transfer', {
+        method: 'POST',
+        body: JSON.stringify({ toUsername, amount })
+      });
+
+      const body = await res.json().catch(()=>({ message: 'Unknown error' }));
+      if (!res.ok) {
+        el('transfer-msg').textContent = body.message || 'Transfer failed';
+        el('transfer-msg').className = 'error';
+        return;
+      }
+      el('transfer-msg').textContent = body.message + ' — new balance: ₹' + (body.fromBalance?.toFixed ? body.fromBalance.toFixed(2) : body.fromBalance);
+      el('transfer-msg').className = 'success';
+      await loadBalance();
+    }
+
+    async function logoutServer() {
+      await fetch(API + '/logout', { method: 'POST', credentials: 'include' });
+      logoutClient();
+    }
+
+    function logoutClient() {
+      accessToken = null;
+      username = null;
+      el('dashboard').style.display = 'none';
+      el('login-section').style.display = 'block';
+      el('login-msg').textContent = 'Logged out';
+    }
+
+    function showDashboard() {
+      el('login-section').style.display = 'none';
+      el('dashboard').style.display = 'block';
+      el('login-msg').textContent = '';
+    }
+
+    // Buttons
+    document.getElementById('btnLogin').addEventListener('click', login);
+    document.getElementById('btnTransfer').addEventListener('click', transfer);
+    document.getElementById('btnLogout').addEventListener('click', logoutServer);
+    document.getElementById('btnRefresh').addEventListener('click', async () => {
+      const ok = await tryRefresh();
+      alert(ok ? 'Token refreshed' : 'Refresh failed — please login again');
+    });
+
+    // optional: auto-refresh access token every 14 minutes if desired (demo)
+    // setInterval(async () => { await tryRefresh(); }, 14 * 60 * 1000);
+  </script>
+</body>
+</html>
